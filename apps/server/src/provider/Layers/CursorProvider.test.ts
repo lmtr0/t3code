@@ -20,6 +20,7 @@ import {
   parseCursorAboutOutput,
   parseCursorCliConfigChannel,
   parseCursorVersionDate,
+  probeCursorProjectSlashCommands,
   resolveCursorAcpBaseModelId,
   resolveCursorAcpConfigUpdates,
 } from "./CursorProvider.ts";
@@ -79,6 +80,12 @@ const makeMockAgentWrapper = Effect.fn("makeMockAgentWrapper")(function* (
     .join("\n");
   const script = `#!/bin/sh
 ${envExports}
+if [ -n "$T3_ACP_CWD_LOG_PATH" ]; then
+  pwd > "$T3_ACP_CWD_LOG_PATH"
+fi
+if [ "$T3_ACP_EXIT_AFTER_CWD_LOG" = "1" ]; then
+  exit 42
+fi
 exec ${mockAgentCommand} "$@"
 `;
   yield* fileSystem.writeFileString(wrapperPath, script);
@@ -153,6 +160,28 @@ const makeExitLogFixture = Effect.fn("makeExitLogFixture")(function* (prefix: st
     exitLogPath,
     wrapperPath: yield* makeMockAgentWrapper({
       T3_ACP_EXIT_LOG_PATH: exitLogPath,
+    }),
+  };
+});
+
+const makeCwdLogFixture = Effect.fn("makeCwdLogFixture")(function* () {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const tempDir = yield* fileSystem.makeTempDirectory({
+    directory: NodeOS.tmpdir(),
+    prefix: "cursor-provider-cwd-log-",
+  });
+  const projectDir = yield* fileSystem.makeTempDirectory({
+    directory: NodeOS.tmpdir(),
+    prefix: "cursor-provider-project-",
+  });
+  const cwdLogPath = path.join(tempDir, "cwd.log");
+  return {
+    cwdLogPath,
+    projectDir,
+    wrapperPath: yield* makeMockAgentWrapper({
+      T3_ACP_CWD_LOG_PATH: cwdLogPath,
+      T3_ACP_EXIT_AFTER_CWD_LOG: "1",
     }),
   };
 });
@@ -510,6 +539,44 @@ describe("discoverCursorModelsViaAcp", () => {
 
     const exitLog = await runNode(waitForFileContent(exitLogPath));
     expect(exitLog).toContain("SIGTERM");
+  });
+});
+
+describe("probeCursorProjectSlashCommands", () => {
+  it("starts ACP command discovery in the requested project cwd", async () => {
+    const { cwdLogPath, projectDir, wrapperPath } = await runNode(makeCwdLogFixture());
+
+    await expect(
+      runNode(
+        probeCursorProjectSlashCommands(
+          {
+            enabled: true,
+            binaryPath: wrapperPath,
+            apiEndpoint: "",
+            customModels: [],
+          },
+          projectDir,
+        ),
+      ),
+    ).rejects.toThrow();
+
+    await expect(runNode(waitForFileContent(cwdLogPath))).resolves.toBe(`${projectDir}\n`);
+  });
+
+  it("fails immediately when ACP startup fails", async () => {
+    await expect(
+      runNode(
+        probeCursorProjectSlashCommands(
+          {
+            enabled: true,
+            binaryPath: "/definitely-missing-cursor-agent",
+            apiEndpoint: "",
+            customModels: [],
+          },
+          process.cwd(),
+        ),
+      ),
+    ).rejects.toThrow();
   });
 });
 
